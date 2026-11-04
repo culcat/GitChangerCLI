@@ -1,4 +1,5 @@
 mod git;
+mod interactive;
 mod ssh_agent;
 mod ssh_config;
 mod types;
