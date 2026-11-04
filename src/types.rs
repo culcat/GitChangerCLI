@@ -12,6 +12,7 @@ pub enum Transport {
     Https,
 }
 
+#[allow(dead_code)]
 impl Transport {
     pub fn is_ssh(&self) -> bool {
         matches!(self, Transport::Ssh)
@@ -195,6 +196,7 @@ impl Config {
         })
     }
 
+    #[allow(dead_code)]
     pub fn find_profile_mut(&mut self, id_or_alias: &str) -> Option<&mut GitProfile> {
         let query = id_or_alias.trim().to_lowercase();
         self.profiles.iter_mut().find(|p| {
@@ -204,6 +206,7 @@ impl Config {
         })
     }
 
+    #[allow(dead_code)]
     pub fn get_default_profile(&self) -> Option<&GitProfile> {
         self.profiles.iter().find(|p| p.is_default)
     }

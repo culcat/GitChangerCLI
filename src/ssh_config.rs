@@ -32,6 +32,7 @@ impl SSHConfigManager {
         Self { config_path }
     }
 
+    #[allow(dead_code)]
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
         Self {
             config_path: path.into(),

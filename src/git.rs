@@ -30,6 +30,7 @@ impl fmt::Display for GitScope {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GitRepoStatus {
     pub is_repo: bool,
@@ -41,6 +42,7 @@ pub struct GitRepoStatus {
     pub matched_profile: Option<GitProfile>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ApplyResult {
     pub profile_name: String,
@@ -121,6 +123,7 @@ impl GitManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn unset_config(&self, cwd: &Path, key: &str, scope: GitScope) -> Result<()> {
         let mut cmd = Command::new("git");
         cmd.args(["config", scope.flag(), "--unset", key]).current_dir(cwd);

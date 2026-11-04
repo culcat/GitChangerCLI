@@ -65,6 +65,7 @@ impl SSHAgentManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn remove_key(&self, key_path: &Path) -> Result<()> {
         let key_str = key_path.to_string_lossy();
         let output = Command::new("ssh-add")
