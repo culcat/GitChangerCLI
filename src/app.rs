@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::cli::AddArgs;
 use crate::git::{GitManager, GitScope};
 use crate::interactive::Interactive;
+use crate::mcp::McpConfigManager;
 use crate::ssh_agent::SSHAgentManager;
 use crate::ssh_config::SSHConfigManager;
 use crate::types::{Config, GitProfile, Transport};
@@ -19,6 +20,7 @@ pub struct App {
     pub git: GitManager,
     pub ssh_config: SSHConfigManager,
     pub ssh_agent: SSHAgentManager,
+    pub mcp: McpConfigManager,
     pub cwd: PathBuf,
 }
 
@@ -28,6 +30,7 @@ impl App {
         let git = GitManager::new();
         let ssh_config = SSHConfigManager::new();
         let ssh_agent = SSHAgentManager::new();
+        let mcp = McpConfigManager::new();
         let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         Ok(Self {
@@ -35,6 +38,7 @@ impl App {
             git,
             ssh_config,
             ssh_agent,
+            mcp,
             cwd,
         })
     }
@@ -99,6 +103,29 @@ impl App {
             println!("  {} {}", "Signing Key:".bold(), key.cyan());
         }
 
+        // GitHub MCP token
+        if let Some((path, token)) = self.mcp.get_active_token(None) {
+            let masked = McpConfigManager::mask_token(&token);
+            let matched_profile = self.config.profiles.iter().find(|p| p.github_token.as_deref() == Some(&token));
+            let match_note = match (matched_profile, repo_status.matched_profile.as_ref()) {
+                (Some(p), Some(curr)) if p.id == curr.id => {
+                    format!("(matches active profile '{}')", p.id).green()
+                }
+                (Some(p), _) => {
+                    format!("(matches profile '{}')", p.id).yellow()
+                }
+                (None, _) => {
+                    "(active in MCP client)".dimmed()
+                }
+            };
+            println!("  {} {} {}", "MCP Token:".bold(), masked.cyan(), match_note);
+            if verbose {
+                println!("  {} {}", "MCP Config:".bold(), path.display().to_string().dimmed());
+            }
+        } else {
+            println!("  {} {}", "MCP Token:".bold(), "Not configured in MCP clients".yellow());
+        }
+
         // Remotes
         if !repo_status.remotes.is_empty() {
             println!("\n{}", "Git Remotes:".bold());
@@ -136,6 +163,17 @@ impl App {
 
             println!("  {} {}", "SSH Config File:".bold(), self.ssh_config.config_path().display().to_string().dimmed());
             println!("  {} {}", "Profiles Config:".bold(), Config::config_file_path()?.display().to_string().dimmed());
+
+            println!("\n{}", "MCP Diagnostics:".bold());
+            let mcp_configs = self.mcp.scan_all_configs();
+            if mcp_configs.is_empty() {
+                println!("  {} No MCP client configuration files found", "Clients:".dimmed());
+            } else {
+                for (target, tok) in &mcp_configs {
+                    let tok_str = tok.as_deref().map(McpConfigManager::mask_token).unwrap_or_else(|| "none".to_string());
+                    println!("  • {:<24} [{}] {}", target.name.bold(), tok_str.cyan(), target.path.display().to_string().dimmed());
+                }
+            }
         }
 
         Ok(())
@@ -164,6 +202,7 @@ impl App {
                 Cell::new("Transport").fg(Color::Cyan),
                 Cell::new("Host Alias").fg(Color::Cyan),
                 Cell::new("SSH Key Path").fg(Color::Cyan),
+                Cell::new("MCP Token").fg(Color::Cyan),
                 Cell::new("Default").fg(Color::Cyan),
             ]);
         } else {
@@ -173,6 +212,7 @@ impl App {
                 Cell::new("Name").fg(Color::Cyan),
                 Cell::new("Email").fg(Color::Cyan),
                 Cell::new("Transport").fg(Color::Cyan),
+                Cell::new("MCP Token").fg(Color::Cyan),
                 Cell::new("Default").fg(Color::Cyan),
             ]);
         }
@@ -196,6 +236,12 @@ impl App {
                 Transport::Https => Cell::new("HTTPS").fg(Color::Cyan),
             };
 
+            let mcp_cell = if let Some(ref tok) = profile.github_token {
+                Cell::new(McpConfigManager::mask_token(tok)).fg(Color::Cyan)
+            } else {
+                Cell::new("-").fg(Color::DarkGrey)
+            };
+
             let mut row = Row::new();
             row.add_cell(active_cell);
             row.add_cell(Cell::new(&profile.id).fg(Color::White));
@@ -214,6 +260,7 @@ impl App {
                 row.add_cell(Cell::new(key_str));
             }
 
+            row.add_cell(mcp_cell);
             row.add_cell(default_cell);
             table.add_row(row);
         }
@@ -229,6 +276,7 @@ impl App {
         global: bool,
         no_remote_update: bool,
         no_ssh_agent: bool,
+        no_mcp: bool,
         test_conn: bool,
     ) -> Result<()> {
         let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
@@ -310,6 +358,28 @@ impl App {
             }
         }
 
+        // GitHub MCP token handling
+        if !no_mcp {
+            if let Some(ref token) = target_profile.github_token {
+                match self.mcp.sync_token(token, None) {
+                    Ok(synced) => {
+                        for (path, updated) in synced {
+                            if updated {
+                                println!(
+                                    "  {} Updated GitHub MCP token in {}",
+                                    "✓".green(),
+                                    path.display().to_string().cyan()
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Failed to sync GitHub MCP token: {}", "!".yellow(), e);
+                    }
+                }
+            }
+        }
+
         println!(
             "\n{} Switched to profile '{}' ({}) <{}> [{}]",
             "✓".green().bold(),
@@ -343,6 +413,7 @@ impl App {
             p.ssh_host_alias = args.alias;
             p.ssh_host_name = args.host.or_else(|| Some("github.com".to_string()));
             p.signing_key = args.signing_key;
+            p.github_token = args.token;
             p.is_default = args.default;
             p.validate()?;
             p
@@ -370,7 +441,7 @@ impl App {
 
         if !args.non_interactive && self.git.is_git_repository(&self.cwd) {
             if Interactive::confirm("Apply this profile to the current repository now?", true).unwrap_or(false) {
-                self.switch(Some(id), false, false, false, false)?;
+                self.switch(Some(id), false, false, false, false, false)?;
             }
         }
 
@@ -517,6 +588,11 @@ impl App {
             .as_deref()
             .context("Profile has no SSH host alias configured")?;
 
+        // Ensure SSH host block is present in ~/.ssh/config before testing
+        if let Err(e) = self.ssh_config.add_or_update_host_block(&target_profile) {
+            eprintln!("{} Failed to ensure host block in ~/.ssh/config: {}", "Warning:".yellow(), e);
+        }
+
         println!("Testing SSH connection to host alias '{}'...", alias.cyan().bold());
         let (ok, msg) = self.ssh_agent.test_connection(alias);
         if ok {
@@ -558,12 +634,36 @@ impl App {
             }
         }
 
+        let mcp_configs = self.mcp.scan_all_configs();
+        println!("\nFound {} MCP client config(s):", mcp_configs.len().to_string().cyan().bold());
+        if mcp_configs.is_empty() {
+            println!("  {}", "No MCP client configurations found in standard paths".dimmed());
+        } else {
+            for (target, tok) in &mcp_configs {
+                let tok_status = match tok {
+                    Some(t) => {
+                        let masked = McpConfigManager::mask_token(t);
+                        let matched = self.config.profiles.iter().find(|p| p.github_token.as_deref() == Some(t));
+                        if let Some(p) = matched {
+                            format!("token: {} (linked to '{}')", masked, p.id).green()
+                        } else {
+                            format!("token: {} (unlinked)", masked).yellow()
+                        }
+                    }
+                    None => "no token configured".dimmed(),
+                };
+                println!("  • {:<24} {} [{}]", target.name.bold(), target.path.display().to_string().dimmed(), tok_status);
+            }
+        }
+
         println!("\n{}", "Configured GitChanger Profiles:".bold());
         for p in &self.config.profiles {
-            println!("  • {:<12} {} <{}>", p.id.bright_cyan(), p.name, p.email.dimmed());
+            let tok_str = p.github_token.as_deref().map(McpConfigManager::mask_token).unwrap_or_else(|| "-".to_string());
+            println!("  • {:<12} {} <{}> [mcp: {}]", p.id.bright_cyan(), p.name, p.email.dimmed(), tok_str.cyan());
         }
 
         println!("\n{} Run '{}' to create a new profile with these keys.", "Tip:".cyan(), "gitchanger add".bold());
+        println!("{} Run '{}' to view or sync GitHub MCP tokens.", "Tip:".cyan(), "gitchanger mcp".bold());
         Ok(())
     }
 
@@ -609,6 +709,420 @@ impl App {
         }
 
         println!("{} Imported {} profile(s) successfully.", "✓".green().bold(), imported_count);
+        Ok(())
+    }
+
+    pub fn mcp_status(&self) -> Result<()> {
+        println!("{}", "⚡ GitHub MCP Status".bright_cyan().bold());
+        println!("{}", "───────────────────".dimmed());
+
+        let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+        if let Some(ref curr) = repo_status.matched_profile {
+            let tok_str = curr
+                .github_token
+                .as_deref()
+                .map(McpConfigManager::mask_token)
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "  {} {} (profile token: {})",
+                "Active Git Profile:".bold(),
+                curr.id.bright_green().bold(),
+                tok_str.cyan()
+            );
+        }
+
+        println!("\n{}", "MCP Client Configuration Files:".bold());
+        let configs = self.mcp.scan_all_configs();
+        if configs.is_empty() {
+            println!(
+                "  {}",
+                "No MCP configuration files detected on this system.".yellow()
+            );
+        } else {
+            for (target, tok) in &configs {
+                let tok_str = match tok {
+                    Some(t) => {
+                        let masked = McpConfigManager::mask_token(t);
+                        let matched = self
+                            .config
+                            .profiles
+                            .iter()
+                            .find(|p| p.github_token.as_deref() == Some(t));
+                        if let Some(p) = matched {
+                            format!("{} (matches profile '{}')", masked, p.id).green()
+                        } else {
+                            format!("{} (custom/unlinked)", masked).yellow()
+                        }
+                    }
+                    None => "not set".dimmed(),
+                };
+                println!(
+                    "  • {:<24} {} -> {}",
+                    target.name.bold(),
+                    target.path.display().to_string().dimmed(),
+                    tok_str
+                );
+            }
+        }
+
+        println!("\n{}", "Profile Token Configurations:".bold());
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL);
+        table.apply_modifier(UTF8_ROUND_CORNERS);
+        table.set_header(vec![
+            Cell::new("Profile ID").fg(Color::Cyan),
+            Cell::new("Author Name").fg(Color::Cyan),
+            Cell::new("MCP Token").fg(Color::Cyan),
+            Cell::new("Status").fg(Color::Cyan),
+        ]);
+
+        let active_mcp_token = self.mcp.get_active_token(None).map(|(_, t)| t);
+
+        for p in &self.config.profiles {
+            let tok_cell = match p.github_token {
+                Some(ref t) => Cell::new(McpConfigManager::mask_token(t)).fg(Color::Cyan),
+                None => Cell::new("-").fg(Color::DarkGrey),
+            };
+
+            let in_sync_cell = match (p.github_token.as_deref(), active_mcp_token.as_deref()) {
+                (Some(p_tok), Some(m_tok)) if p_tok == m_tok => {
+                    Cell::new("active in MCP").fg(Color::Green)
+                }
+                (Some(_), Some(_)) => Cell::new("ready").fg(Color::Yellow),
+                (Some(_), None) => Cell::new("ready (MCP unset)").fg(Color::Yellow),
+                (None, _) => Cell::new("-").fg(Color::DarkGrey),
+            };
+
+            let mut row = Row::new();
+            row.add_cell(Cell::new(&p.id));
+            row.add_cell(Cell::new(&p.name));
+            row.add_cell(tok_cell);
+            row.add_cell(in_sync_cell);
+            table.add_row(row);
+        }
+
+        println!("{}", table);
+        println!(
+            "\n{} Use '{}' to sync a profile token to MCP clients.",
+            "Tip:".cyan(),
+            "gitchanger mcp sync <profile>".bold()
+        );
+        println!(
+            "{} Use '{}' to set or update a token.",
+            "Tip:".cyan(),
+            "gitchanger mcp set <profile>".bold()
+        );
+        println!(
+            "{} Use '{}' to test token validity via GitHub API.",
+            "Tip:".cyan(),
+            "gitchanger mcp test [profile]".bold()
+        );
+
+        Ok(())
+    }
+
+    pub fn mcp_set(
+        &mut self,
+        profile_query: Option<String>,
+        token: Option<String>,
+        sync: bool,
+        direct: bool,
+        file: Option<PathBuf>,
+    ) -> Result<()> {
+        let token_value = match token {
+            Some(t) => t.trim().to_string(),
+            None => Interactive::prompt_token("Enter GitHub Personal Access Token (PAT):")?,
+        };
+
+        if token_value.is_empty() {
+            bail!("Token cannot be empty");
+        }
+
+        if direct {
+            // Apply token directly to MCP configuration file(s)
+            let synced = self.mcp.sync_token(&token_value, file.as_deref())?;
+            for (p, updated) in synced {
+                if updated {
+                    println!(
+                        "{} Updated GitHub MCP token in {}",
+                        "✓".green().bold(),
+                        p.display()
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        // Apply to profile
+        let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+        let current_id = repo_status.matched_profile.as_ref().map(|p| p.id.as_str());
+
+        let target_id = match profile_query {
+            Some(q) => q,
+            None => {
+                let selected = Interactive::select_profile(
+                    &self.config.profiles,
+                    current_id,
+                    "Select Git profile to set GitHub MCP token for:",
+                )?;
+                match selected {
+                    Some(p) => p.id.clone(),
+                    None => {
+                        println!("{}", "Operation canceled.".dimmed());
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        let profile = self
+            .config
+            .find_profile_mut(&target_id)
+            .with_context(|| format!("Profile '{}' not found", target_id))?;
+
+        profile.github_token = Some(token_value.clone());
+        let profile_id = profile.id.clone();
+        self.config.save()?;
+
+        println!(
+            "{} Configured GitHub MCP token for profile '{}' ({})",
+            "✓".green().bold(),
+            profile_id.bright_green(),
+            McpConfigManager::mask_token(&token_value).cyan()
+        );
+
+        if sync {
+            let synced = self.mcp.sync_token(&token_value, file.as_deref())?;
+            for (p, updated) in synced {
+                if updated {
+                    println!(
+                        "  {} Synced to MCP config: {}",
+                        "✓".green(),
+                        p.display().to_string().dimmed()
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn mcp_get(&self, profile_query: Option<String>, unmask: bool) -> Result<()> {
+        let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+
+        let token_info = match profile_query {
+            Some(ref q) => {
+                let p = self
+                    .config
+                    .find_profile(q)
+                    .with_context(|| format!("Profile '{}' not found", q))?;
+                p.github_token.clone().with_context(|| {
+                    format!("Profile '{}' has no GitHub MCP token configured", p.id)
+                })?
+            }
+            None => {
+                if let Some(ref p) = repo_status.matched_profile {
+                    if let Some(ref t) = p.github_token {
+                        t.clone()
+                    } else if let Some((_, t)) = self.mcp.get_active_token(None) {
+                        t
+                    } else {
+                        bail!("No GitHub MCP token configured for active profile or in MCP client configs");
+                    }
+                } else if let Some((_, t)) = self.mcp.get_active_token(None) {
+                    t
+                } else if let Some(p) = self.config.get_default_profile() {
+                    p.github_token
+                        .clone()
+                        .with_context(|| "No GitHub MCP token found")?
+                } else {
+                    bail!("No GitHub MCP token found");
+                }
+            }
+        };
+
+        if unmask {
+            println!("{}", token_info);
+        } else {
+            println!(
+                "GitHub MCP Token: {}",
+                McpConfigManager::mask_token(&token_info).cyan().bold()
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn mcp_sync(&self, profile_query: Option<String>, file: Option<PathBuf>) -> Result<()> {
+        let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+
+        let target_profile = match profile_query {
+            Some(ref q) => self
+                .config
+                .find_profile(q)
+                .with_context(|| format!("Profile '{}' not found", q))?,
+            None => {
+                if let Some(ref p) = repo_status.matched_profile {
+                    p
+                } else if let Some(p) = self.config.get_default_profile() {
+                    p
+                } else {
+                    bail!("No profile specified and no active/default profile found");
+                }
+            }
+        };
+
+        let token = target_profile.github_token.as_deref().with_context(|| {
+            format!(
+                "Profile '{}' has no GitHub MCP token configured. Run 'gitchanger mcp set {}' first.",
+                target_profile.id, target_profile.id
+            )
+        })?;
+
+        let synced = self.mcp.sync_token(token, file.as_deref())?;
+        if synced.is_empty() {
+            println!("{}", "No MCP configuration files updated.".yellow());
+        } else {
+            println!(
+                "{} Synced GitHub MCP token from profile '{}' ({}) to:",
+                "✓".green().bold(),
+                target_profile.id.bright_green(),
+                McpConfigManager::mask_token(token).cyan()
+            );
+            for (p, updated) in synced {
+                let note = if updated {
+                    "updated".green()
+                } else {
+                    "already up to date".dimmed()
+                };
+                println!("  • {} ({})", p.display(), note);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn mcp_remove(&mut self, profile_query: Option<String>, clear_mcp: bool) -> Result<()> {
+        let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+        let current_id = repo_status.matched_profile.as_ref().map(|p| p.id.as_str());
+
+        let target_id = match profile_query {
+            Some(q) => q,
+            None => {
+                let selected = Interactive::select_profile(
+                    &self.config.profiles,
+                    current_id,
+                    "Select Git profile to remove GitHub MCP token from:",
+                )?;
+                match selected {
+                    Some(p) => p.id.clone(),
+                    None => return Ok(()),
+                }
+            }
+        };
+
+        let profile = self
+            .config
+            .find_profile_mut(&target_id)
+            .with_context(|| format!("Profile '{}' not found", target_id))?;
+
+        profile.github_token = None;
+        self.config.save()?;
+        println!(
+            "{} Removed GitHub MCP token from profile '{}'.",
+            "✓".green().bold(),
+            target_id
+        );
+
+        if clear_mcp {
+            let configs = self.mcp.scan_all_configs();
+            for (target, _) in configs {
+                if let Ok(true) = McpConfigManager::remove_token_from_file(&target.path) {
+                    println!("  {} Cleared token from {}", "✓".green(), target.path.display());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn mcp_test(&self, profile_query: Option<String>, custom_token: Option<String>) -> Result<()> {
+        let (source_name, token_to_test) = if let Some(t) = custom_token {
+            ("provided token".to_string(), t)
+        } else if let Some(ref q) = profile_query {
+            let p = self
+                .config
+                .find_profile(q)
+                .with_context(|| format!("Profile '{}' not found", q))?;
+            let tok = p.github_token.as_deref().with_context(|| {
+                format!("Profile '{}' has no GitHub MCP token configured", p.id)
+            })?;
+            (format!("profile '{}'", p.id), tok.to_string())
+        } else {
+            let repo_status = self.git.inspect_status(&self.cwd, &self.config.profiles);
+            if let Some(ref p) = repo_status.matched_profile {
+                if let Some(ref t) = p.github_token {
+                    (format!("active profile '{}'", p.id), t.clone())
+                } else if let Some((ref path, ref t)) = self.mcp.get_active_token(None) {
+                    (format!("MCP file ({})", path.display()), t.clone())
+                } else {
+                    bail!("No token found to test. Provide --token or profile name.");
+                }
+            } else if let Some((ref path, ref t)) = self.mcp.get_active_token(None) {
+                (format!("MCP file ({})", path.display()), t.clone())
+            } else {
+                bail!("No token found to test. Provide --token or profile name.");
+            }
+        };
+
+        println!(
+            "Testing GitHub MCP token from {} ({}) via GitHub API...",
+            source_name.bold(),
+            McpConfigManager::mask_token(&token_to_test).cyan()
+        );
+
+        match self.mcp.test_github_token(&token_to_test) {
+            Ok(info) => {
+                println!("\n{} GitHub Token is valid!", "✓".green().bold());
+                println!("  {} {}", "Account:".bold(), info.login.bright_green().bold());
+                if let Some(name) = info.name {
+                    println!("  {} {}", "Name:".bold(), name);
+                }
+                if let Some(email) = info.email {
+                    println!("  {} {}", "Email:".bold(), email);
+                }
+                if let Some(limit) = info.rate_limit_remaining {
+                    println!("  {} {} requests", "API Rate Limit:".bold(), limit.to_string().cyan());
+                }
+
+                println!(
+                    "  {} {}",
+                    "OAuth Scopes:".bold(),
+                    if info.scopes.is_empty() {
+                        "None (fine-grained PAT or empty scopes)".yellow().to_string()
+                    } else {
+                        info.scopes.join(", ").cyan().to_string()
+                    }
+                );
+
+                let has_repo = info.scopes.iter().any(|s| s == "repo" || s == "public_repo");
+                if has_repo {
+                    println!(
+                        "  {} Has 'repo' scope (required for GitHub MCP repository operations)",
+                        "✓".green()
+                    );
+                } else if !info.scopes.is_empty() {
+                    println!(
+                        "  {} Token is missing 'repo' scope. GitHub MCP may not have access to private repositories or write operations.",
+                        "Warning:".yellow().bold()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("\n{} GitHub Token verification failed: {}", "✗".red().bold(), e);
+            }
+        }
+
         Ok(())
     }
 }

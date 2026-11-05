@@ -144,7 +144,21 @@ impl SSHConfigManager {
             .as_ref()
             .context("Profile is missing ssh_key_path")?;
 
-        let key_str = key_path.to_string_lossy();
+        let key_str = if key_path.is_absolute() {
+            if let Some(home) = dirs::home_dir() {
+                if let Ok(rel) = key_path.strip_prefix(&home) {
+                    format!("~/{}", rel.display())
+                } else {
+                    key_path.to_string_lossy().to_string()
+                }
+            } else {
+                key_path.to_string_lossy().to_string()
+            }
+        } else if !key_path.starts_with("~") {
+            format!("~/.ssh/{}", key_path.display())
+        } else {
+            key_path.to_string_lossy().to_string()
+        };
 
         Ok(format!(
             "Host {}\n    HostName {}\n    User git\n    IdentityFile {}\n    IdentitiesOnly yes\n",
@@ -216,16 +230,27 @@ impl SSHConfigManager {
         Ok(blocks.into_iter().map(|b| b.host).collect())
     }
 
-    pub fn validate_ssh_key(&self, key_path: &Path) -> Result<()> {
-        let resolved = if key_path.starts_with("~") {
+    pub fn resolve_key_path(&self, key_path: &Path) -> PathBuf {
+        if key_path.starts_with("~") {
             if let Some(home) = dirs::home_dir() {
                 home.join(key_path.strip_prefix("~").unwrap_or(key_path))
             } else {
                 key_path.to_path_buf()
             }
+        } else if !key_path.is_absolute() {
+            let in_ssh = self.ssh_dir().join(key_path);
+            if in_ssh.exists() {
+                in_ssh
+            } else {
+                key_path.to_path_buf()
+            }
         } else {
             key_path.to_path_buf()
-        };
+        }
+    }
+
+    pub fn validate_ssh_key(&self, key_path: &Path) -> Result<()> {
+        let resolved = self.resolve_key_path(key_path);
 
         if !resolved.exists() {
             bail!("SSH key file does not exist: {:?}", resolved);
@@ -248,6 +273,33 @@ impl SSHConfigManager {
         Ok(())
     }
 
+    fn is_ssh_private_key_file(path: &Path, file_name: &str) -> bool {
+        if file_name.starts_with("id_") || file_name.ends_with(".pem") || file_name.ends_with(".key") {
+            return true;
+        }
+
+        // Check if matching .pub file exists
+        let pub_path = path.parent().map(|p| p.join(format!("{}.pub", file_name)));
+        if let Some(pub_p) = pub_path {
+            if pub_p.exists() {
+                return true;
+            }
+        }
+
+        // Check file content for private key signature
+        if let Ok(mut file) = fs::File::open(path) {
+            use std::io::Read;
+            let mut buffer = [0u8; 256];
+            if let Ok(n) = file.read(&mut buffer) {
+                if buffer[..n].windows(11).any(|window| window == b"PRIVATE KEY") {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     pub fn scan_ssh_keys(&self) -> Result<Vec<PathBuf>> {
         let ssh_dir = self.ssh_dir();
         if !ssh_dir.exists() {
@@ -264,10 +316,8 @@ impl SSHConfigManager {
                 let is_known = file_name.starts_with("known_hosts") || file_name == "config" || file_name == "authorized_keys";
                 let is_bak = file_name.ends_with(".bak") || file_name.ends_with(".old");
 
-                if !is_pub && !is_known && !is_bak {
-                    if file_name.starts_with("id_") || file_name.ends_with(".pem") || file_name.ends_with(".key") {
-                        keys.push(path);
-                    }
+                if !is_pub && !is_known && !is_bak && Self::is_ssh_private_key_file(&path, file_name) {
+                    keys.push(path);
                 }
             }
         }
@@ -325,6 +375,22 @@ Host gitlab-work
         assert!(manager.remove_host_block("gh-test").unwrap());
         let content = manager.read_config().unwrap();
         assert!(!content.contains("Host gh-test"));
+    }
+
+    #[test]
+    fn test_scan_ssh_keys_detects_custom_named_keys() {
+        let temp_dir = tempfile_dir("ssh_scan_test");
+        let config_path = temp_dir.join("config");
+        let manager = SSHConfigManager::with_path(&config_path);
+
+        // Key with .pub companion
+        let custom_key = temp_dir.join("culcat");
+        let custom_pub = temp_dir.join("culcat.pub");
+        fs::write(&custom_key, "-----BEGIN OPENSSH PRIVATE KEY-----\ndummy").unwrap();
+        fs::write(&custom_pub, "ssh-ed25519 AAAA...").unwrap();
+
+        let scanned = manager.scan_ssh_keys().unwrap();
+        assert!(scanned.contains(&custom_key));
     }
 
     fn tempfile_dir(name: &str) -> PathBuf {

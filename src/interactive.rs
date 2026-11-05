@@ -177,6 +177,14 @@ impl Interactive {
             Some(signing_key_input.trim().to_string())
         };
 
+        let token_input = Text::new("GitHub Personal Access Token for GitHub MCP (optional, press Enter to skip):")
+            .prompt()?;
+        let github_token = if token_input.trim().is_empty() {
+            None
+        } else {
+            Some(token_input.trim().to_string())
+        };
+
         let is_first = existing_profiles.is_empty();
         let is_default = if is_first {
             true
@@ -192,6 +200,7 @@ impl Interactive {
         profile.ssh_host_name = ssh_host_name;
         profile.use_ssh_agent = use_ssh_agent;
         profile.signing_key = signing_key;
+        profile.github_token = github_token;
         profile.is_default = is_default;
 
         Ok(profile)
@@ -292,6 +301,25 @@ impl Interactive {
             Some(signing_key_input.trim().to_string())
         };
 
+        let current_tok_masked = profile
+            .github_token
+            .as_deref()
+            .map(crate::mcp::McpConfigManager::mask_token)
+            .unwrap_or_else(|| "none".to_string());
+
+        let token_prompt = format!(
+            "GitHub Personal Access Token for GitHub MCP [current: {}] (Enter to keep, '-' to clear, or paste new):",
+            current_tok_masked
+        );
+        let token_input = Text::new(&token_prompt).prompt()?;
+        let github_token = if token_input.trim().is_empty() {
+            profile.github_token.clone()
+        } else if token_input.trim() == "-" {
+            None
+        } else {
+            Some(token_input.trim().to_string())
+        };
+
         let is_default = Confirm::new("Set this profile as default?")
             .with_default(profile.is_default)
             .prompt()?;
@@ -302,9 +330,27 @@ impl Interactive {
         updated.ssh_host_name = ssh_host_name;
         updated.use_ssh_agent = use_ssh_agent;
         updated.signing_key = signing_key;
+        updated.github_token = github_token;
         updated.is_default = is_default;
 
         Ok(updated)
+    }
+
+    pub fn prompt_token(prompt_msg: &str) -> Result<String> {
+        let token = inquire::Password::new(prompt_msg)
+            .without_confirmation()
+            .with_validator(|input: &str| {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    Ok(Validation::Invalid("Token cannot be empty".into()))
+                } else if trimmed.contains(char::is_whitespace) {
+                    Ok(Validation::Invalid("Token cannot contain whitespace".into()))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            })
+            .prompt()?;
+        Ok(token)
     }
 
     pub fn confirm(message: &str, default: bool) -> Result<bool> {
@@ -326,5 +372,14 @@ pub fn shellexpand_tilde(path_str: &str) -> PathBuf {
             }
         }
     }
-    PathBuf::from(trimmed)
+    let p = PathBuf::from(trimmed);
+    if !p.is_absolute() {
+        if let Some(home) = dirs::home_dir() {
+            let in_ssh = home.join(".ssh").join(trimmed);
+            if in_ssh.exists() {
+                return in_ssh;
+            }
+        }
+    }
+    p
 }

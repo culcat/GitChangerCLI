@@ -50,6 +50,10 @@ pub enum Commands {
         #[arg(long)]
         no_ssh_agent: bool,
 
+        /// Do not automatically sync GitHub MCP configuration token
+        #[arg(long)]
+        no_mcp: bool,
+
         /// Test SSH connection after switching
         #[arg(short, long)]
         test: bool,
@@ -89,6 +93,13 @@ pub enum Commands {
     Test {
         /// Profile ID to test (interactive if omitted)
         profile: Option<String>,
+    },
+
+    /// Manage GitHub MCP tokens (aliases: token, tokens)
+    #[command(alias = "token", alias = "tokens")]
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommands>,
     },
 
     /// Scan ~/.ssh directory and SSH config for existing keys and hosts
@@ -145,6 +156,10 @@ pub struct AddArgs {
     #[arg(long)]
     pub signing_key: Option<String>,
 
+    /// GitHub Personal Access Token for GitHub MCP
+    #[arg(long = "token", alias = "github-token")]
+    pub token: Option<String>,
+
     /// Set this profile as default
     #[arg(short, long)]
     pub default: bool,
@@ -152,4 +167,73 @@ pub struct AddArgs {
     /// Skip interactive prompts (all required fields must be supplied via flags)
     #[arg(long)]
     pub non_interactive: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCommands {
+    /// Show GitHub MCP token status and detected client configurations
+    Status,
+
+    /// Set GitHub MCP token for a profile or directly in MCP client configs
+    Set {
+        /// Profile ID to associate the token with
+        profile: Option<String>,
+
+        /// GitHub Personal Access Token (prompted securely if omitted)
+        #[arg(short, long)]
+        token: Option<String>,
+
+        /// Immediately sync token to all detected MCP client configuration files
+        #[arg(long, default_value_t = true)]
+        sync: bool,
+
+        /// Apply token directly to MCP configuration files without saving to a Git profile
+        #[arg(long)]
+        direct: bool,
+
+        /// Path to custom MCP config file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+
+    /// Get configured GitHub MCP token for a profile or current MCP configuration
+    Get {
+        /// Profile ID (uses active or default profile if omitted)
+        profile: Option<String>,
+
+        /// Display unmasked full token (useful for copying or scripts)
+        #[arg(short = 'u', long = "unmask", alias = "show-full")]
+        unmask: bool,
+    },
+
+    /// Sync a profile's GitHub token to detected MCP client configuration files
+    Sync {
+        /// Profile ID whose token should be synced (uses active or default if omitted)
+        profile: Option<String>,
+
+        /// Path to custom MCP config file to sync to
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+
+    /// Remove GitHub MCP token from a profile and/or MCP client configs
+    #[command(alias = "rm")]
+    Remove {
+        /// Profile ID to remove token from
+        profile: Option<String>,
+
+        /// Also clear token from detected MCP client configuration files
+        #[arg(long)]
+        clear_mcp: bool,
+    },
+
+    /// Test and verify GitHub token against GitHub API
+    Test {
+        /// Profile ID whose token to test (or omit to test active MCP token)
+        profile: Option<String>,
+
+        /// Custom raw token string to test directly
+        #[arg(short, long)]
+        token: Option<String>,
+    },
 }

@@ -30,6 +30,11 @@
   - Авто-сканирование приватных ключей в папке `~/.ssh/`.
 - **🔍 Сканирование системы (`gitchanger scan`)**:
   - Обнаружение всех приватных ключей и хостов в системе для быстрого импорта.
+- **🤖 Менеджмент токенов GitHub MCP (`mcp` / `token`)**:
+  - Привязка GitHub Personal Access Token (PAT) к каждому Git-профилю.
+  - Автоматическая синхронизация токена в конфигурациях MCP-клиентов (Antigravity, Claude Desktop, Cursor, VS Code) при смене профиля (`gitchanger switch`).
+  - Проверка валидности токенов, аккаунтов и OAuth-скоупов через официальный GitHub API (`gitchanger mcp test`).
+  - Безопасное маскирование токенов в терминале (`ghp_****...****`).
 - **💾 Резервное копирование (`export` / `import`)**:
   - Экспорт и импорт профилей в формате JSON или TOML для переноса между машинами.
 - **🔌 Git Subcommand**:
@@ -124,15 +129,16 @@ gitchanger add
 4. Выбрать протокол (`SSH` или `HTTPS`).
 5. Для SSH: выбрать найденный SSH-ключ из `~/.ssh/` или указать свой путь, задать алиас хоста и домен (например, `github.com`).
 6. Опционально указать ключ подписи коммитов (`user.signingkey`).
-7. Установить профиль по умолчанию.
+7. Опционально указать Personal Access Token (PAT) для GitHub MCP (`--token`).
+8. Установить профиль по умолчанию.
 
 #### Неинтерактивный режим (для скриптов):
 ```bash
 # Добавление HTTPS-профиля
-gitchanger add --id personal --name "culcat" --email "culcat@example.com" --transport https --default --non-interactive
+gitchanger add --id personal --name "culcat" --email "culcat@example.com" --transport https --token ghp_xxx --default --non-interactive
 
 # Добавление SSH-профиля
-gitchanger add --id work --name "Work User" --email "work@corp.com" --transport ssh --key ~/.ssh/id_ed25519_work --alias gh-work --host github.com --non-interactive
+gitchanger add --id work --name "Work User" --email "work@corp.com" --transport ssh --key ~/.ssh/id_ed25519_work --alias gh-work --host github.com --token ghp_yyy --non-interactive
 ```
 
 ---
@@ -153,6 +159,7 @@ gitchanger switch work
 - `-g, --global`: применить профиль глобально в `~/.gitconfig` (по умолчанию применяется локально к текущему репозиторию).
 - `--no-remote-update`: не изменять URL удалённых репозиториев (origin).
 - `--no-ssh-agent`: не добавлять ключ в ssh-agent.
+- `--no-mcp`: не обновлять токен в файлах конфигурации GitHub MCP.
 - `-t, --test`: протестировать SSH-соединение сразу после переключения.
 
 ---
@@ -196,7 +203,39 @@ gitchanger scan
 
 ---
 
-### 10. Экспорт и импорт (`export` / `import`)
+### 10. Управление токенами GitHub MCP (`mcp` / `token`)
+
+GitChanger позволяет управлять токенами Personal Access Token (PAT) для GitHub MCP-серверов (`@modelcontextprotocol/server-github`) в **Antigravity / Gemini CLI**, **Claude Desktop**, **Cursor** и **VS Code**:
+
+```bash
+# Просмотр статуса токенов в профилях и найденных конфигурациях MCP
+gitchanger mcp status
+
+# Привязка токена к профилю (интерактивный ввод с маскированием)
+gitchanger mcp set work
+
+# Установка токена напрямую флагом
+gitchanger mcp set work --token ghp_yourTokenHere
+
+# Синхронизация токена профиля в конфигурационные файлы MCP-клиентов
+gitchanger mcp sync work
+
+# Просмотр сохранённого токена (маскированный или полный для экспорта в скрипты)
+gitchanger mcp get work
+gitchanger mcp get work --unmask
+
+# Тестирование токена через GitHub API (проверка логина, лимитов и скоупов, включая 'repo')
+gitchanger mcp test work
+
+# Удаление токена из профиля (и опционально очистка из MCP-файлов)
+gitchanger mcp remove work --clear-mcp
+```
+
+При переключении активного профиля (`gitchanger switch <id>`), если у целевого профиля настроен токен GitHub MCP, он **автоматически синхронизируется** во все обнаруженные конфигурационные файлы MCP-клиентов (если не указан флаг `--no-mcp`).
+
+---
+
+### 11. Экспорт и импорт (`export` / `import`)
 
 ```bash
 # Экспорт в файл
@@ -226,6 +265,7 @@ name = "culcat"
 email = "krainukovaleksandr1@gmail.com"
 transport = "https"
 ssh_host_name = "github.com"
+github_token = "ghp_PersonalPAT..."
 use_ssh_agent = true
 is_default = true
 
@@ -237,6 +277,7 @@ transport = "ssh"
 ssh_host_alias = "gh-work"
 ssh_host_name = "github.com"
 ssh_key_path = "/home/aleksandr/.ssh/id_ed25519_work"
+github_token = "ghp_WorkPAT..."
 use_ssh_agent = true
 is_default = false
 ```
@@ -246,7 +287,8 @@ is_default = false
 ## 🔒 Безопасность
 
 - GitChanger **не хранит** пароли или приватные ключи SSH. Хранятся исключительно ссылки на локальные пути к ключам.
-- При изменении `~/.ssh/config` всегда создаётся автоматический бэкап `~/.ssh/config.bak`.
+- Токены GitHub MCP в терминале **всегда маскируются** (`ghp_QFoL...BkGQ`) во всех командах (`status`, `list`, `scan`, `mcp status`), предотвращая случайную утечку на стримах или скриншотах. Полный токен можно вывести только явным флагом `--unmask`.
+- При изменении `~/.ssh/config` и файлов конфигурации MCP всегда создаётся автоматический бэкап (`.bak`).
 - Права доступа к `~/.ssh/config` выставляются в строгий режим `0600`.
 - Запись конфигурации осуществляется атомарно через временные файлы для предотвращения повреждения данных.
 

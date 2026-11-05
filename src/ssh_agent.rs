@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, Default)]
@@ -50,35 +50,58 @@ impl SSHAgentManager {
         Ok(())
     }
 
+    pub fn resolve_key_path(key_path: &Path) -> PathBuf {
+        if key_path.starts_with("~") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(key_path.strip_prefix("~").unwrap_or(key_path))
+            } else {
+                key_path.to_path_buf()
+            }
+        } else if !key_path.is_absolute() {
+            if let Some(home) = dirs::home_dir() {
+                let in_ssh = home.join(".ssh").join(key_path);
+                if in_ssh.exists() {
+                    in_ssh
+                } else {
+                    key_path.to_path_buf()
+                }
+            } else {
+                key_path.to_path_buf()
+            }
+        } else {
+            key_path.to_path_buf()
+        }
+    }
+
     pub fn add_key(&self, key_path: &Path) -> Result<()> {
-        let key_str = key_path.to_string_lossy();
+        let resolved = Self::resolve_key_path(key_path);
         let output = Command::new("ssh-add")
-            .arg(key_str.as_ref())
+            .arg(&resolved)
             .output()
-            .with_context(|| format!("Failed to run ssh-add for {:?}", key_path))?;
+            .with_context(|| format!("Failed to run ssh-add for {:?}", resolved))?;
 
         if output.status.success() {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("ssh-add failed for {:?}: {}", key_path, stderr.trim());
+            bail!("ssh-add failed for {:?}: {}", resolved, stderr.trim());
         }
     }
 
     #[allow(dead_code)]
     pub fn remove_key(&self, key_path: &Path) -> Result<()> {
-        let key_str = key_path.to_string_lossy();
+        let resolved = Self::resolve_key_path(key_path);
         let output = Command::new("ssh-add")
             .arg("-d")
-            .arg(key_str.as_ref())
+            .arg(&resolved)
             .output()
-            .with_context(|| format!("Failed to run ssh-add -d for {:?}", key_path))?;
+            .with_context(|| format!("Failed to run ssh-add -d for {:?}", resolved))?;
 
         if output.status.success() {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to remove SSH key {:?}: {}", key_path, stderr.trim());
+            bail!("Failed to remove SSH key {:?}: {}", resolved, stderr.trim());
         }
     }
 

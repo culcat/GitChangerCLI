@@ -60,6 +60,8 @@ pub struct GitProfile {
     pub use_ssh_agent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_token: Option<String>,
     #[serde(default)]
     pub is_default: bool,
 }
@@ -80,6 +82,7 @@ impl GitProfile {
             ssh_host_name: None,
             use_ssh_agent: true,
             signing_key: None,
+            github_token: None,
             is_default: false,
         }
     }
@@ -96,6 +99,15 @@ impl GitProfile {
         }
         if !self.email.contains('@') || !self.email.contains('.') {
             bail!("Invalid email format: '{}'", self.email);
+        }
+
+        if let Some(ref token) = self.github_token {
+            if token.trim().is_empty() {
+                bail!("GitHub token cannot be blank");
+            }
+            if token.contains('\n') || token.contains('\r') {
+                bail!("GitHub token contains invalid newline characters");
+            }
         }
 
         if self.transport == Transport::Ssh {
@@ -323,5 +335,20 @@ mod tests {
         assert_eq!("ssh".parse::<Transport>().unwrap(), Transport::Ssh);
         assert_eq!("HTTPS".parse::<Transport>().unwrap(), Transport::Https);
         assert!("ftp".parse::<Transport>().is_err());
+    }
+
+    #[test]
+    fn test_profile_github_token() {
+        let mut p = GitProfile::new("dev", "Developer", "dev@example.com", Transport::Https);
+        p.github_token = Some("ghp_ValidToken123456789".to_string());
+        assert!(p.validate().is_ok());
+
+        // Invalid empty token
+        p.github_token = Some("   ".to_string());
+        assert!(p.validate().is_err());
+
+        // Invalid newline in token
+        p.github_token = Some("ghp_token\nwith_newline".to_string());
+        assert!(p.validate().is_err());
     }
 }
